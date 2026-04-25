@@ -1,69 +1,72 @@
+#ifndef CALCULATOR_HPP
+#define CALCULATOR_HPP
+
 #include <iostream>
 #include <string>
 #include <memory>
 #include <cctype>
 #include <stdexcept>
 #include <any>
+#include <sstream>
 
 using namespace std;
 
-// Forward declaration
-class Visitor;
+// Forward declarations
+class expr;
+class number_expr;
+class binary_expr;
 
-// Base class for all expression nodes
-class Expr {
+// Visitor base class
+class visitor {
 public:
-    virtual ~Expr() = default;
-    virtual any accept(Visitor& visitor) = 0;
+    virtual ~visitor() = default;
+    virtual any visit(number_expr* node) = 0;
+    virtual any visit(binary_expr* node) = 0;
 };
 
-// Number literal node
-class Number : public Expr {
+// Expression base class
+class expr {
+public:
+    virtual ~expr() = default;
+    virtual any accept(visitor* v) = 0;
+};
+
+// Number expression
+class number_expr : public expr {
 public:
     double value;
-    explicit Number(double v) : value(v) {}
-    any accept(Visitor& visitor) override;
+    explicit number_expr(double v) : value(v) {}
+    
+    any accept(visitor* v) override {
+        return v->visit(this);
+    }
 };
 
-// Binary operation node
-class BinaryOp : public Expr {
+// Binary operation expression
+class binary_expr : public expr {
 public:
     char op;
-    unique_ptr<Expr> left;
-    unique_ptr<Expr> right;
+    shared_ptr<expr> left;
+    shared_ptr<expr> right;
     
-    BinaryOp(char o, unique_ptr<Expr> l, unique_ptr<Expr> r)
-        : op(o), left(move(l)), right(move(r)) {}
-    any accept(Visitor& visitor) override;
+    binary_expr(char o, shared_ptr<expr> l, shared_ptr<expr> r)
+        : op(o), left(l), right(r) {}
+    
+    any accept(visitor* v) override {
+        return v->visit(this);
+    }
 };
 
-// Visitor interface
-class Visitor {
+// Calculator visitor
+class calculator : public visitor {
 public:
-    virtual ~Visitor() = default;
-    virtual any visitNumber(Number* node) = 0;
-    virtual any visitBinaryOp(BinaryOp* node) = 0;
-};
-
-// Implement accept methods
-any Number::accept(Visitor& visitor) {
-    return visitor.visitNumber(this);
-}
-
-any BinaryOp::accept(Visitor& visitor) {
-    return visitor.visitBinaryOp(this);
-}
-
-// Evaluation visitor
-class EvalVisitor : public Visitor {
-public:
-    any visitNumber(Number* node) override {
+    any visit(number_expr* node) override {
         return node->value;
     }
     
-    any visitBinaryOp(BinaryOp* node) override {
-        double left_val = any_cast<double>(node->left->accept(*this));
-        double right_val = any_cast<double>(node->right->accept(*this));
+    any visit(binary_expr* node) override {
+        double left_val = any_cast<double>(node->left->accept(this));
+        double right_val = any_cast<double>(node->right->accept(this));
         
         switch (node->op) {
             case '+':
@@ -73,97 +76,84 @@ public:
             case '*':
                 return left_val * right_val;
             case '/':
-                if (right_val == 0) {
-                    throw runtime_error("Division by zero");
-                }
                 return left_val / right_val;
             default:
-                throw runtime_error("Unknown operator");
+                return 0.0;
         }
     }
 };
 
 // Parser class
-class Parser {
+class expr_parser {
 private:
-    string expr;
+    string input;
     size_t pos;
     
-    void skipWhitespace() {
-        while (pos < expr.length() && isspace(expr[pos])) {
+    void skip_whitespace() {
+        while (pos < input.length() && isspace(input[pos])) {
             pos++;
         }
     }
     
     char peek() {
-        skipWhitespace();
-        if (pos < expr.length()) {
-            return expr[pos];
+        skip_whitespace();
+        if (pos < input.length()) {
+            return input[pos];
         }
         return '\0';
     }
     
     char consume() {
-        skipWhitespace();
-        if (pos < expr.length()) {
-            return expr[pos++];
+        skip_whitespace();
+        if (pos < input.length()) {
+            return input[pos++];
         }
         return '\0';
     }
     
-    unique_ptr<Expr> parseNumber() {
-        skipWhitespace();
+    shared_ptr<expr> parse_number() {
+        skip_whitespace();
         size_t start = pos;
-        bool has_dot = false;
         
-        if (pos < expr.length() && (expr[pos] == '-' || expr[pos] == '+')) {
+        if (pos < input.length() && (input[pos] == '-' || input[pos] == '+')) {
             pos++;
         }
         
-        while (pos < expr.length() && (isdigit(expr[pos]) || expr[pos] == '.')) {
-            if (expr[pos] == '.') {
+        bool has_dot = false;
+        while (pos < input.length() && (isdigit(input[pos]) || input[pos] == '.')) {
+            if (input[pos] == '.') {
                 if (has_dot) break;
                 has_dot = true;
             }
             pos++;
         }
         
-        if (start == pos || (pos == start + 1 && (expr[start] == '-' || expr[start] == '+'))) {
-            throw runtime_error("Invalid number");
-        }
-        
-        double value = stod(expr.substr(start, pos - start));
-        return make_unique<Number>(value);
+        double value = stod(input.substr(start, pos - start));
+        return make_shared<number_expr>(value);
     }
     
-    unique_ptr<Expr> parsePrimary() {
+    shared_ptr<expr> parse_primary() {
         char c = peek();
         
         if (c == '(') {
             consume();
-            auto result = parseExpression();
-            if (consume() != ')') {
-                throw runtime_error("Expected ')'");
-            }
+            auto result = parse_expression();
+            consume(); // consume ')'
             return result;
         }
         
-        if (isdigit(c) || c == '-' || c == '+' || c == '.') {
-            return parseNumber();
-        }
-        
-        throw runtime_error("Unexpected character");
+        return parse_number();
     }
     
-    unique_ptr<Expr> parseTerm() {
-        auto left = parsePrimary();
+    shared_ptr<expr> parse_term() {
+        auto left = parse_primary();
         
         while (true) {
             char c = peek();
             if (c == '*' || c == '/') {
                 consume();
-                auto right = parsePrimary();
-                left = make_unique<BinaryOp>(c, move(left), move(right));
+                auto right = parse_primary();
+                left = make_shared<binary_expr>(c, left, right);
             } else {
                 break;
             }
@@ -172,15 +162,15 @@ private:
         return left;
     }
     
-    unique_ptr<Expr> parseExpression() {
-        auto left = parseTerm();
+    shared_ptr<expr> parse_expression() {
+        auto left = parse_term();
         
         while (true) {
             char c = peek();
             if (c == '+' || c == '-') {
                 consume();
-                auto right = parseTerm();
-                left = make_unique<BinaryOp>(c, move(left), move(right));
+                auto right = parse_term();
+                left = make_shared<binary_expr>(c, left, right);
             } else {
                 break;
             }
@@ -190,36 +180,11 @@ private:
     }
     
 public:
-    explicit Parser(const string& expression) : expr(expression), pos(0) {}
+    explicit expr_parser(const string& s) : input(s), pos(0) {}
     
-    unique_ptr<Expr> parse() {
-        return parseExpression();
+    shared_ptr<expr> parse() {
+        return parse_expression();
     }
 };
 
-int main() {
-    string line;
-    while (getline(cin, line)) {
-        if (line.empty()) continue;
-        
-        try {
-            Parser parser(line);
-            auto ast = parser.parse();
-            
-            EvalVisitor evaluator;
-            double result = any_cast<double>(ast->accept(evaluator));
-            
-            // Check if result is an integer
-            if (result == static_cast<int>(result)) {
-                cout << static_cast<int>(result) << endl;
-            } else {
-                cout << result << endl;
-            }
-        } catch (const exception& e) {
-            cerr << "Error: " << e.what() << endl;
-            return 1;
-        }
-    }
-    
-    return 0;
-}
+#endif // CALCULATOR_HPP
